@@ -6,7 +6,6 @@ on:
     # 台北/北京时间：周一到周五 07:00
     - cron: "0 23 * * 0-4"
 
-  # 允许手动运行测试
   workflow_dispatch:
 
 concurrency:
@@ -41,7 +40,7 @@ jobs:
             --skip-git-repo-check \
             --sandbox danger-full-access \
             --ephemeral \
-            "OK"
+            "Reply exactly: OK"
 
       - name: Run Codex account 2
         continue-on-error: true
@@ -62,4 +61,4 @@ jobs:
             --skip-git-repo-check \
             --sandbox danger-full-access \
             --ephemeral \
-            "OK"
+            "Reply exactly: OK"
