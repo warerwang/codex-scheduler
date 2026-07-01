@@ -13,11 +13,14 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
 
     steps:
       - name: Install Codex CLI
         run: npm install -g @openai/codex
+
+      - name: Print UTC time
+        run: date -u
 
       - name: Run Codex account 1
         continue-on-error: true
@@ -37,9 +40,10 @@ jobs:
             --skip-git-repo-check \
             --sandbox read-only \
             --ephemeral \
-            "Run date -u only. Do not inspect any repository. Do not edit files. Reply with the UTC time only."
+            "Reply exactly: OK"
 
       - name: Run Codex account 2
+        continue-on-error: true
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON_2 }}
         run: |
@@ -56,4 +60,4 @@ jobs:
             --skip-git-repo-check \
             --sandbox read-only \
             --ephemeral \
-            "Run date -u only. Do not inspect any repository. Do not edit files. Reply with the UTC time only."
+            "Reply exactly: OK"
