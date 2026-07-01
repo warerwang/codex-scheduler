@@ -3,7 +3,10 @@ name: Codex Refresh Time
 on:
   schedule:
     # UTC 周日到周四 23:00
+    # 台北/北京时间：周一到周五 07:00
     - cron: "0 23 * * 0-4"
+
+  # 允许手动运行测试
   workflow_dispatch:
 
 concurrency:
@@ -18,9 +21,6 @@ jobs:
     steps:
       - name: Install Codex CLI
         run: npm install -g @openai/codex
-
-      - name: Print UTC time
-        run: date -u
 
       - name: Run Codex account 1
         continue-on-error: true
@@ -37,10 +37,11 @@ jobs:
           cd /tmp/codex-refresh-1
 
           codex exec \
+            --model gpt-5.4-mini \
             --skip-git-repo-check \
-            --sandbox read-only \
+            --sandbox danger-full-access \
             --ephemeral \
-            "Reply exactly: OK"
+            "OK"
 
       - name: Run Codex account 2
         continue-on-error: true
@@ -57,7 +58,8 @@ jobs:
           cd /tmp/codex-refresh-2
 
           codex exec \
+            --model gpt-5.4-mini \
             --skip-git-repo-check \
-            --sandbox read-only \
+            --sandbox danger-full-access \
             --ephemeral \
-            "Reply exactly: OK"
+            "OK"
