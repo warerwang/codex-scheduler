@@ -19,14 +19,16 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          rm -rf ~/.codex
-          mkdir -p ~/.codex
-          chmod 700 ~/.codex
+          export CODEX_HOME="$HOME/.codex"
 
-          printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
-          chmod 600 ~/.codex/auth.json
+          rm -rf "$CODEX_HOME"
+          mkdir -p "$CODEX_HOME"
+          chmod 700 "$CODEX_HOME"
 
-          cat > ~/.codex/config.toml <<'EOF'
+          printf '%s' "$CODEX_AUTH_JSON" > "$CODEX_HOME/auth.json"
+          chmod 600 "$CODEX_HOME/auth.json"
+
+          cat > "$CODEX_HOME/config.toml" <<'EOF'
           model = "gpt-5.4-mini"
           approval_policy = "never"
           sandbox_mode = "danger-full-access"
@@ -39,13 +41,27 @@ jobs:
             --model gpt-5.4-mini \
             --skip-git-repo-check \
             --sandbox danger-full-access \
-            --ephemeral \
-            "1+1=几?"
+            "Reply exactly: OK"
+
+          echo
+          echo "===== CODEX_HOME files ====="
+          find "$CODEX_HOME" -maxdepth 4 -type f | sort || true
 
           echo
           echo "===== Find latest Codex session ====="
 
-          latest="$(find ~/.codex/sessions -name '*.jsonl' -print0 | xargs -0 ls -t | head -1)"
+          if [ ! -d "$CODEX_HOME/sessions" ]; then
+            echo "No sessions directory found: $CODEX_HOME/sessions"
+            echo "Try checking CODEX_HOME content above."
+            exit 1
+          fi
+
+          latest="$(find "$CODEX_HOME/sessions" -name '*.jsonl' -print0 | xargs -0 ls -t | head -1)"
+
+          if [ -z "$latest" ]; then
+            echo "No jsonl session file found."
+            exit 1
+          fi
 
           echo "latest session: $latest"
 
@@ -68,3 +84,10 @@ jobs:
               ]
             | .[]
           ' "$latest" | tail -n 5
+
+          echo
+          echo "===== Debug latest token_count events ====="
+          jq -c '
+            select(.type=="event_msg" and .payload.type=="token_count")
+            | .payload
+          ' "$latest" | tail -n 3 || true
