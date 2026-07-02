@@ -1,19 +1,10 @@
-name: Codex Refresh Time
+name: Codex Usage Check
 
 on:
-  schedule:
-    # UTC 周日到周四 23:00
-    # 台北/北京时间：周一到周五 07:00
-    - cron: "0 23 * * 0-4"
-
   workflow_dispatch:
 
-concurrency:
-  group: codex-refresh-time
-  cancel-in-progress: true
-
 jobs:
-  refresh:
+  check-usage:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -21,44 +12,46 @@ jobs:
       - name: Install Codex CLI
         run: npm install -g @openai/codex
 
-      - name: Run Codex account 1
+      - name: Check Codex account 1 usage
         continue-on-error: true
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON_1 }}
+          TERM: xterm-256color
         run: |
           rm -rf ~/.codex
           mkdir -p ~/.codex
           chmod 700 ~/.codex
+
           printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
           chmod 600 ~/.codex/auth.json
 
-          mkdir -p /tmp/codex-refresh-1
-          cd /tmp/codex-refresh-1
+          cat > ~/.codex/config.toml <<'EOF'
+          model = "gpt-5.4-mini"
+          approval_policy = "never"
+          sandbox_mode = "danger-full-access"
+          EOF
 
-          codex exec \
-            --model gpt-5.4-mini \
-            --skip-git-repo-check \
-            --sandbox danger-full-access \
-            --ephemeral \
-            "你是谁?"
+          mkdir -p /tmp/codex-usage-1
+          cd /tmp/codex-usage-1
 
-      - name: Run Codex account 2
-        continue-on-error: true
-        env:
-          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON_2 }}
-        run: |
-          rm -rf ~/.codex
-          mkdir -p ~/.codex
-          chmod 700 ~/.codex
-          printf '%s' "$CODEX_AUTH_JSON" > ~/.codex/auth.json
-          chmod 600 ~/.codex/auth.json
+          echo "===== Account 1 /status ====="
+          timeout 45s script -q -e -c 'codex --no-alt-screen --skip-git-repo-check --sandbox danger-full-access' /tmp/codex-status-1.log <<'EOF' || true
+          /status
+          EOF
 
-          mkdir -p /tmp/codex-refresh-2
-          cd /tmp/codex-refresh-2
+          echo "===== Account 1 /usage daily ====="
+          timeout 45s script -q -e -c 'codex --no-alt-screen --skip-git-repo-check --sandbox danger-full-access' /tmp/codex-usage-daily-1.log <<'EOF' || true
+          /usage daily
+          EOF
 
-          codex exec \
-            --model gpt-5.4-mini \
-            --skip-git-repo-check \
-            --sandbox danger-full-access \
-            --ephemeral \
-            "你是谁?"
+          echo "===== Saved logs ====="
+          ls -lah /tmp/codex-status-1.log /tmp/codex-usage-daily-1.log || true
+
+      - name: Upload Codex usage logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-usage-logs
+          path: |
+            /tmp/codex-status-1.log
+            /tmp/codex-usage-daily-1.log
