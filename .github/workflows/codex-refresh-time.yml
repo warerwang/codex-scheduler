@@ -40,7 +40,7 @@ jobs:
             --skip-git-repo-check \
             --sandbox danger-full-access \
             --ephemeral \
-            "你好."
+            "你是谁?"
 
       - name: Run Codex account 2
         continue-on-error: true
@@ -61,4 +61,4 @@ jobs:
             --skip-git-repo-check \
             --sandbox danger-full-access \
             --ephemeral \
-            "你好."
+            "你是谁?"
