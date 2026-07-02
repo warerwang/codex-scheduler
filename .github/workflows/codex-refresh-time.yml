@@ -1,10 +1,10 @@
-name: Codex Usage Check
+name: Codex Rate Limit Check
 
 on:
   workflow_dispatch:
 
 jobs:
-  check-usage:
+  check-rate-limit:
     runs-on: ubuntu-latest
     timeout-minutes: 10
 
@@ -12,12 +12,13 @@ jobs:
       - name: Install Codex CLI
         run: npm install -g @openai/codex
 
-      - name: Check Codex account 1 usage
-        continue-on-error: true
+      - name: Run Codex and parse rate limits
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON_1 }}
-          TERM: xterm-256color
+          TZ: Asia/Taipei
         run: |
+          set -Eeuo pipefail
+
           rm -rf ~/.codex
           mkdir -p ~/.codex
           chmod 700 ~/.codex
@@ -31,27 +32,39 @@ jobs:
           sandbox_mode = "danger-full-access"
           EOF
 
-          mkdir -p /tmp/codex-usage-1
-          cd /tmp/codex-usage-1
+          mkdir -p /tmp/codex-rate-limit-check
+          cd /tmp/codex-rate-limit-check
 
-          echo "===== Account 1 /status ====="
-          timeout 45s script -q -e -c 'codex --no-alt-screen --skip-git-repo-check --sandbox danger-full-access' /tmp/codex-status-1.log <<'EOF' || true
-          /status
-          EOF
+          codex exec \
+            --model gpt-5.4-mini \
+            --skip-git-repo-check \
+            --sandbox danger-full-access \
+            --ephemeral \
+            "1+1=几?"
 
-          echo "===== Account 1 /usage daily ====="
-          timeout 45s script -q -e -c 'codex --no-alt-screen --skip-git-repo-check --sandbox danger-full-access' /tmp/codex-usage-daily-1.log <<'EOF' || true
-          /usage daily
-          EOF
+          echo
+          echo "===== Find latest Codex session ====="
 
-          echo "===== Saved logs ====="
-          ls -lah /tmp/codex-status-1.log /tmp/codex-usage-daily-1.log || true
+          latest="$(find ~/.codex/sessions -name '*.jsonl' -print0 | xargs -0 ls -t | head -1)"
 
-      - name: Upload Codex usage logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: codex-usage-logs
-          path: |
-            /tmp/codex-status-1.log
-            /tmp/codex-usage-daily-1.log
+          echo "latest session: $latest"
+
+          echo
+          echo "===== Codex rate limits ====="
+
+          jq -r '
+            select(
+              .type == "event_msg"
+              and .payload.type == "token_count"
+              and .payload.rate_limits
+            )
+            | .payload.rate_limits
+            | [
+                "limit: " + ((.limit_name // .limit_id // "unknown") | tostring),
+                "5h used: " + ((.primary.used_percent // 0) | tostring) + "%",
+                "5h reset: " + ((.primary.resets_at // 0) | strflocaltime("%Y-%m-%d %H:%M:%S %Z")),
+                "week used: " + ((.secondary.used_percent // 0) | tostring) + "%",
+                "week reset: " + ((.secondary.resets_at // 0) | strflocaltime("%Y-%m-%d %H:%M:%S %Z"))
+              ]
+            | .[]
+          ' "$latest" | tail -n 5
