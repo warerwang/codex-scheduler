@@ -1,18 +1,29 @@
 name: Codex Rate Limit Check
 
 on:
+  schedule:
+    # 台北时间：周一到周五 06:00
+    # GitHub Actions cron 使用 UTC，所以这里是 UTC 周日到周四 22:00
+    - cron: "0 22 * * 0-4"
+
+  # 保留手动运行按钮
   workflow_dispatch:
+
+concurrency:
+  group: codex-rate-limit-check
+  cancel-in-progress: true
 
 jobs:
   check-rate-limit:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Install Codex CLI
         run: npm install -g @openai/codex
 
-      - name: Run Codex and parse rate limits
+      - name: Check Codex account 1
+        continue-on-error: true
         env:
           CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON_1 }}
           TZ: Asia/Taipei
@@ -34,8 +45,14 @@ jobs:
           sandbox_mode = "danger-full-access"
           EOF
 
-          mkdir -p /tmp/codex-rate-limit-check
-          cd /tmp/codex-rate-limit-check
+          mkdir -p /tmp/codex-rate-limit-account-1
+          cd /tmp/codex-rate-limit-account-1
+
+          echo "===== Account 1 run time ====="
+          echo "UTC now:    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Taipei now: $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S %Z')"
+
+          start_ts=$(date +%s)
 
           codex exec \
             --model gpt-5.4-mini \
@@ -43,31 +60,24 @@ jobs:
             --sandbox danger-full-access \
             "Reply exactly: OK"
 
-          echo
-          echo "===== CODEX_HOME files ====="
-          find "$CODEX_HOME" -maxdepth 4 -type f | sort || true
+          end_ts=$(date +%s)
 
           echo
-          echo "===== Find latest Codex session ====="
+          echo "===== Account 1 Codex execution ====="
+          echo "Codex duration: $((end_ts - start_ts)) seconds"
 
-          if [ ! -d "$CODEX_HOME/sessions" ]; then
-            echo "No sessions directory found: $CODEX_HOME/sessions"
-            echo "Try checking CODEX_HOME content above."
-            exit 1
-          fi
-
-          latest="$(find "$CODEX_HOME/sessions" -name '*.jsonl' -print0 | xargs -0 ls -t | head -1)"
-
-          if [ -z "$latest" ]; then
-            echo "No jsonl session file found."
-            exit 1
-          fi
-
-          echo "latest session: $latest"
+          latest="$(
+            find "$CODEX_HOME/sessions" -type f -name '*.jsonl' -print0 \
+              | xargs -0 ls -t \
+              | head -1
+          )"
 
           echo
-          echo "===== Codex rate limits ====="
+          echo "===== Account 1 latest session ====="
+          echo "session file: $latest"
 
+          echo
+          echo "===== Account 1 Codex rate limits ====="
           jq -r '
             select(
               .type == "event_msg"
@@ -85,9 +95,75 @@ jobs:
             | .[]
           ' "$latest" | tail -n 5
 
+      - name: Check Codex account 2
+        continue-on-error: true
+        env:
+          CODEX_AUTH_JSON: ${{ secrets.CODEX_AUTH_JSON_2 }}
+          TZ: Asia/Taipei
+        run: |
+          set -Eeuo pipefail
+
+          export CODEX_HOME="$HOME/.codex"
+
+          rm -rf "$CODEX_HOME"
+          mkdir -p "$CODEX_HOME"
+          chmod 700 "$CODEX_HOME"
+
+          printf '%s' "$CODEX_AUTH_JSON" > "$CODEX_HOME/auth.json"
+          chmod 600 "$CODEX_HOME/auth.json"
+
+          cat > "$CODEX_HOME/config.toml" <<'EOF'
+          model = "gpt-5.4-mini"
+          approval_policy = "never"
+          sandbox_mode = "danger-full-access"
+          EOF
+
+          mkdir -p /tmp/codex-rate-limit-account-2
+          cd /tmp/codex-rate-limit-account-2
+
+          echo "===== Account 2 run time ====="
+          echo "UTC now:    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          echo "Taipei now: $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S %Z')"
+
+          start_ts=$(date +%s)
+
+          codex exec \
+            --model gpt-5.4-mini \
+            --skip-git-repo-check \
+            --sandbox danger-full-access \
+            "Reply exactly: OK"
+
+          end_ts=$(date +%s)
+
           echo
-          echo "===== Debug latest token_count events ====="
-          jq -c '
-            select(.type=="event_msg" and .payload.type=="token_count")
-            | .payload
-          ' "$latest" | tail -n 3 || true
+          echo "===== Account 2 Codex execution ====="
+          echo "Codex duration: $((end_ts - start_ts)) seconds"
+
+          latest="$(
+            find "$CODEX_HOME/sessions" -type f -name '*.jsonl' -print0 \
+              | xargs -0 ls -t \
+              | head -1
+          )"
+
+          echo
+          echo "===== Account 2 latest session ====="
+          echo "session file: $latest"
+
+          echo
+          echo "===== Account 2 Codex rate limits ====="
+          jq -r '
+            select(
+              .type == "event_msg"
+              and .payload.type == "token_count"
+              and .payload.rate_limits
+            )
+            | .payload.rate_limits
+            | [
+                "limit: " + ((.limit_name // .limit_id // "unknown") | tostring),
+                "5h used: " + ((.primary.used_percent // 0) | tostring) + "%",
+                "5h reset: " + ((.primary.resets_at // 0) | strflocaltime("%Y-%m-%d %H:%M:%S %Z")),
+                "week used: " + ((.secondary.used_percent // 0) | tostring) + "%",
+                "week reset: " + ((.secondary.resets_at // 0) | strflocaltime("%Y-%m-%d %H:%M:%S %Z"))
+              ]
+            | .[]
+          ' "$latest" | tail -n 5
