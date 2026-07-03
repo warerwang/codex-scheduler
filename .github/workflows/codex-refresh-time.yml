@@ -2,10 +2,8 @@ name: Codex Rate Limit Check
 
 on:
   schedule:
-    # 台北时间：周一到周五 06:00
-    # GitHub Actions cron 使用 UTC，所以这里是 UTC 周日到周四 22:00
-    - cron: "0 22 * * 0-4"
-
+    - cron: "3 9 * * 1-5"
+      timezone: "Asia/Taipei"
   # 保留手动运行按钮
   workflow_dispatch:
 
