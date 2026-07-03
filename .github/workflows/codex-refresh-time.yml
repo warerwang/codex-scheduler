@@ -2,7 +2,7 @@ name: Codex Rate Limit Check
 
 on:
   schedule:
-    - cron: "3 9 * * 1-5"
+    - cron: "55 5 * * 1-5"
       timezone: "Asia/Taipei"
   # 保留手动运行按钮
   workflow_dispatch:
