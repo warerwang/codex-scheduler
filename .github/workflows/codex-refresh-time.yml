@@ -28,14 +28,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_SECRET_WRITE_TOKEN }}
         run: |
           set -Eeuo pipefail
-
           if [[ -z "${GH_TOKEN:-}" ]]; then
-            echo "::error::Missing GH_SECRET_WRITE_TOKEN. Configure a fine-grained PAT with Actions Secrets read/write permission for this repository."
+            echo "::error::Missing GH_SECRET_WRITE_TOKEN."
             exit 1
           fi
-
-          # Verify write permission before Codex is allowed to refresh/rotate OAuth tokens.
-          # This avoids consuming a refresh token if the updated auth.json cannot be persisted.
           printf 'ok' | gh secret set CODEX_SECRET_WRITE_CHECK --repo "$GITHUB_REPOSITORY"
 
       - name: Prime Codex accounts and persist refreshed auth
@@ -48,13 +44,14 @@ jobs:
           set -Euo pipefail
 
           MODEL="gpt-5.6-luna"
+          ENDPOINT="https://chatgpt.com/backend-api/codex/responses"
+          CODEX_VERSION="$(codex --version | awk '{print $NF}' | sed 's/^v//')"
           overall_status=0
 
           persist_auth() {
             local secret_name="$1"
             local auth_file="$2"
             local attempt
-
             for attempt in 1 2 3; do
               if gh secret set "$secret_name" --repo "$GITHUB_REPOSITORY" < "$auth_file"; then
                 return 0
@@ -62,35 +59,62 @@ jobs:
               echo "::warning::Failed to persist refreshed auth for $secret_name (attempt $attempt/3)."
               sleep $((attempt * 2))
             done
-
             echo "::error::Unable to persist refreshed auth for $secret_name after 3 attempts."
             return 1
           }
 
-          show_rate_limits() {
+          header_value() {
+            local headers_file="$1"
+            local header_name="$2"
+            grep -i "^${header_name}:" "$headers_file" 2>/dev/null | tail -1 | cut -d: -f2- | tr -d '\r' | xargs || true
+          }
+
+          format_reset_at() {
+            local epoch="$1"
+            if [[ "$epoch" =~ ^[0-9]+$ ]] && [[ "$epoch" -gt 0 ]]; then
+              TZ=Asia/Taipei date -d "@$epoch" '+%Y-%m-%d %H:%M:%S %Z'
+            else
+              echo "unknown"
+            fi
+          }
+
+          show_http_result() {
+            local headers_file="$1"
+            local body_file="$2"
+            local label="$3"
+            local primary_used primary_reset secondary_used secondary_reset total_tokens
+
+            primary_used="$(header_value "$headers_file" "x-codex-primary-used-percent")"
+            primary_reset="$(header_value "$headers_file" "x-codex-primary-reset-at")"
+            secondary_used="$(header_value "$headers_file" "x-codex-secondary-used-percent")"
+            secondary_reset="$(header_value "$headers_file" "x-codex-secondary-reset-at")"
+
+            total_tokens="$(sed -n 's/^data: //p' "$body_file" 2>/dev/null | jq -r 'select(.type == "response.completed") | .response.usage.total_tokens // empty' 2>/dev/null | tail -1 || true)"
+
+            echo
+            echo "===== $label lightweight HTTP result ====="
+            echo "tokens used: ${total_tokens:-unavailable}"
+            echo "5h used: ${primary_used:-unknown}%"
+            echo "5h reset: $(format_reset_at "${primary_reset:-0}")"
+            echo "week used: ${secondary_used:-unknown}%"
+            echo "week reset: $(format_reset_at "${secondary_reset:-0}")"
+          }
+
+          show_codex_rate_limits() {
             local codex_home="$1"
             local label="$2"
             local latest
 
-            latest="$(
-              find "$codex_home/sessions" -type f -name '*.jsonl' -print0 2>/dev/null \
-                | xargs -0 -r ls -t 2>/dev/null \
-                | head -1 || true
-            )"
-
+            latest="$(find "$codex_home/sessions" -type f -name '*.jsonl' -print0 2>/dev/null | xargs -0 -r ls -t 2>/dev/null | head -1 || true)"
             if [[ -z "$latest" ]]; then
               echo "No session rate-limit data found for $label."
               return 0
             fi
 
             echo
-            echo "===== $label Codex rate limits ====="
+            echo "===== $label Codex fallback rate limits ====="
             jq -r '
-              select(
-                .type == "event_msg"
-                and .payload.type == "token_count"
-                and .payload.rate_limits
-              )
+              select(.type == "event_msg" and .payload.type == "token_count" and .payload.rate_limits)
               | .payload.rate_limits
               | [
                   "limit: " + ((.limit_name // .limit_id // "unknown") | tostring),
@@ -103,32 +127,57 @@ jobs:
             ' "$latest" | tail -n 5 || true
           }
 
-          prime_account() {
-            local account_number="$1"
-            local label="Account $account_number"
-            local auth_var="CODEX_AUTH_JSON_${account_number}"
-            local secret_name="CODEX_AUTH_JSON_${account_number}"
-            local auth_json="${!auth_var:-}"
-            local codex_home="$RUNNER_TEMP/codex-home-$account_number"
-            local work_dir="$RUNNER_TEMP/codex-prime-account-$account_number"
-            local before_hash after_hash codex_status
+          lightweight_prime() {
+            local access_token="$1"
+            local account_id="$2"
+            local headers_file="$3"
+            local body_file="$4"
+            local payload_file="$5"
+            local session_id http_status curl_status
 
-            echo
-            echo "===== $label ====="
-            echo "UTC now:    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
-            echo "Taipei now: $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S %Z')"
+            session_id="$(cat /proc/sys/kernel/random/uuid)"
 
-            if [[ -z "$auth_json" ]]; then
-              echo "::error::$secret_name is empty or missing."
-              return 2
+            jq -n --arg model "$MODEL" '{
+              model: $model,
+              input: [
+                {
+                  type: "message",
+                  role: "user",
+                  content: [{type: "input_text", text: "OK"}]
+                }
+              ],
+              tool_choice: "auto",
+              parallel_tool_calls: false,
+              reasoning: null,
+              store: false,
+              stream: true,
+              include: []
+            }' > "$payload_file"
+
+            set +e
+            http_status="$(curl -sS --connect-timeout 20 --max-time 120 -D "$headers_file" -o "$body_file" -w '%{http_code}' -X POST "$ENDPOINT"               -H "Authorization: Bearer $access_token"               -H "ChatGPT-Account-ID: $account_id"               -H "Content-Type: application/json"               -H "Accept: text/event-stream"               -H "OpenAI-Beta: responses=v1"               -H "originator: codex_cli_rs"               -H "version: $CODEX_VERSION"               -H "session_id: $session_id"               -H "User-Agent: codex_cli_rs/$CODEX_VERSION"               --data-binary "@$payload_file")"
+            curl_status=$?
+            set -e
+
+            if [[ $curl_status -ne 0 ]]; then
+              echo "::error::Lightweight HTTP request failed at transport level (curl exit $curl_status)."
+              return 70
             fi
 
-            rm -rf "$codex_home" "$work_dir"
-            mkdir -p "$codex_home" "$work_dir"
-            chmod 700 "$codex_home"
+            echo "Lightweight HTTP status: $http_status"
+            case "$http_status" in
+              2??) return 0 ;;
+              401) return 11 ;;
+              *)   return 20 ;;
+            esac
+          }
 
-            printf '%s' "$auth_json" > "$codex_home/auth.json"
-            chmod 600 "$codex_home/auth.json"
+          codex_refresh_and_prime() {
+            local codex_home="$1"
+            local work_dir="$2"
+            local secret_name="$3"
+            local label="$4"
+            local before_hash after_hash codex_status
 
             cat > "$codex_home/config.toml" <<EOF
           model = "$MODEL"
@@ -138,19 +187,13 @@ jobs:
             chmod 600 "$codex_home/config.toml"
 
             before_hash="$(sha256sum "$codex_home/auth.json" | awk '{print $1}')"
-
             export CODEX_HOME="$codex_home"
             cd "$work_dir"
 
-            # Do not stop here on an inference/auth error: Codex may have refreshed
-            # auth.json before the request failed, and that updated token chain must
-            # still be persisted.
+            echo "$label authentication requires refresh; falling back to Codex CLI."
+
             set +e
-            codex exec \
-              --model "$MODEL" \
-              --skip-git-repo-check \
-              --sandbox read-only \
-              "Reply exactly: OK"
+            codex exec --model "$MODEL" --skip-git-repo-check --sandbox read-only "Reply exactly: OK"
             codex_status=$?
             set -e
 
@@ -163,18 +206,81 @@ jobs:
               fi
               echo "$label refreshed credentials persisted successfully."
             else
-              echo "$label auth.json unchanged; no secret update required."
+              echo "$label auth.json unchanged after Codex fallback."
             fi
 
-            show_rate_limits "$codex_home" "$label"
+            show_codex_rate_limits "$codex_home" "$label"
 
             if [[ $codex_status -ne 0 ]]; then
-              echo "::error::$label Codex execution failed with exit code $codex_status. If authentication is stale, update $secret_name manually."
+              echo "::error::$label Codex fallback failed with exit code $codex_status."
               return "$codex_status"
             fi
 
-            echo "$label prime completed successfully."
+            echo "$label result: CODEX_REFRESH_PRIME_OK"
             return 0
+          }
+
+          prime_account() {
+            local account_number="$1"
+            local label="Account $account_number"
+            local auth_var="CODEX_AUTH_JSON_${account_number}"
+            local secret_name="CODEX_AUTH_JSON_${account_number}"
+            local auth_json="${!auth_var:-}"
+            local codex_home="$RUNNER_TEMP/codex-home-$account_number"
+            local work_dir="$RUNNER_TEMP/codex-prime-account-$account_number"
+            local headers_file="$RUNNER_TEMP/codex-http-headers-$account_number"
+            local body_file="$RUNNER_TEMP/codex-http-body-$account_number"
+            local payload_file="$RUNNER_TEMP/codex-http-payload-$account_number.json"
+            local access_token account_id http_result
+
+            echo
+            echo "===== $label ====="
+            echo "UTC now:    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "Taipei now: $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S %Z')"
+
+            if [[ -z "$auth_json" ]]; then
+              echo "::error::$secret_name is empty or missing."
+              return 2
+            fi
+
+            rm -rf "$codex_home" "$work_dir"
+            rm -f "$headers_file" "$body_file" "$payload_file"
+            mkdir -p "$codex_home" "$work_dir"
+            chmod 700 "$codex_home"
+
+            printf '%s' "$auth_json" > "$codex_home/auth.json"
+            chmod 600 "$codex_home/auth.json"
+
+            access_token="$(jq -r '.tokens.access_token // .access_token // empty' "$codex_home/auth.json")"
+            account_id="$(jq -r '.tokens.account_id // .account_id // .chatgpt_account_id // empty' "$codex_home/auth.json")"
+
+            if [[ -z "$access_token" || -z "$account_id" ]]; then
+              echo "$label has no usable access_token/account_id; using Codex fallback."
+              codex_refresh_and_prime "$codex_home" "$work_dir" "$secret_name" "$label"
+              return $?
+            fi
+
+            set +e
+            lightweight_prime "$access_token" "$account_id" "$headers_file" "$body_file" "$payload_file"
+            http_result=$?
+            set -e
+
+            case "$http_result" in
+              0)
+                show_http_result "$headers_file" "$body_file" "$label"
+                echo "$label result: HTTP_PRIME_OK"
+                return 0
+                ;;
+              11)
+                echo "$label lightweight HTTP returned 401 Unauthorized."
+                codex_refresh_and_prime "$codex_home" "$work_dir" "$secret_name" "$label"
+                return $?
+                ;;
+              *)
+                echo "::error::$label lightweight HTTP prime failed. Codex fallback was not used because this was not an authentication failure."
+                return 1
+                ;;
+            esac
           }
 
           set +e
@@ -184,12 +290,8 @@ jobs:
           status_2=$?
           set -e
 
-          if [[ $status_1 -ne 0 ]]; then
-            overall_status=1
-          fi
-          if [[ $status_2 -ne 0 ]]; then
-            overall_status=1
-          fi
+          [[ $status_1 -ne 0 ]] && overall_status=1
+          [[ $status_2 -ne 0 ]] && overall_status=1
 
           echo
           echo "===== Summary ====="
