@@ -147,7 +147,6 @@ jobs:
             # still be persisted.
             set +e
             codex exec \
-              --ephemeral \
               --model "$MODEL" \
               --skip-git-repo-check \
               --sandbox read-only \
