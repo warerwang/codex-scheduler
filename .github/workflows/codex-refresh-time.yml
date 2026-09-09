@@ -1,0 +1,199 @@
+name: Codex Rate Limit Prime
+
+on:
+  schedule:
+    - cron: "55 5 * * 1-5"
+      timezone: "Asia/Taipei"
+    - cron: "0 11 * * 1-5"
+      timezone: "Asia/Taipei"
+    - cron: "5 16 * * 1-5"
+      timezone: "Asia/Taipei"
+  workflow_dispatch:
+
+concurrency:
+  group: codex-rate-limit-prime
+  cancel-in-progress: false
+
+jobs:
+  prime-codex-accounts:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Install latest Codex CLI
+        run: npm install -g @openai/codex
+
+      - name: Verify repository secret write access
+        env:
+          GH_TOKEN: ${{ secrets.GH_SECRET_WRITE_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+
+          if [[ -z "${GH_TOKEN:-}" ]]; then
+            echo "::error::Missing GH_SECRET_WRITE_TOKEN. Configure a fine-grained PAT with Actions Secrets read/write permission for this repository."
+            exit 1
+          fi
+
+          # Verify write permission before Codex is allowed to refresh/rotate OAuth tokens.
+          # This avoids consuming a refresh token if the updated auth.json cannot be persisted.
+          printf 'ok' | gh secret set CODEX_SECRET_WRITE_CHECK --repo "$GITHUB_REPOSITORY"
+
+      - name: Prime Codex accounts and persist refreshed auth
+        env:
+          CODEX_AUTH_JSON_1: ${{ secrets.CODEX_AUTH_JSON_1 }}
+          CODEX_AUTH_JSON_2: ${{ secrets.CODEX_AUTH_JSON_2 }}
+          GH_TOKEN: ${{ secrets.GH_SECRET_WRITE_TOKEN }}
+          TZ: Asia/Taipei
+        run: |
+          set -Euo pipefail
+
+          MODEL="gpt-5.6-luna"
+          overall_status=0
+
+          persist_auth() {
+            local secret_name="$1"
+            local auth_file="$2"
+            local attempt
+
+            for attempt in 1 2 3; do
+              if gh secret set "$secret_name" --repo "$GITHUB_REPOSITORY" < "$auth_file"; then
+                return 0
+              fi
+              echo "::warning::Failed to persist refreshed auth for $secret_name (attempt $attempt/3)."
+              sleep $((attempt * 2))
+            done
+
+            echo "::error::Unable to persist refreshed auth for $secret_name after 3 attempts."
+            return 1
+          }
+
+          show_rate_limits() {
+            local codex_home="$1"
+            local label="$2"
+            local latest
+
+            latest="$(
+              find "$codex_home/sessions" -type f -name '*.jsonl' -print0 2>/dev/null \
+                | xargs -0 -r ls -t 2>/dev/null \
+                | head -1 || true
+            )"
+
+            if [[ -z "$latest" ]]; then
+              echo "No session rate-limit data found for $label."
+              return 0
+            fi
+
+            echo
+            echo "===== $label Codex rate limits ====="
+            jq -r '
+              select(
+                .type == "event_msg"
+                and .payload.type == "token_count"
+                and .payload.rate_limits
+              )
+              | .payload.rate_limits
+              | [
+                  "limit: " + ((.limit_name // .limit_id // "unknown") | tostring),
+                  "5h used: " + ((.primary.used_percent // 0) | tostring) + "%",
+                  "5h reset: " + ((.primary.resets_at // 0) | strflocaltime("%Y-%m-%d %H:%M:%S %Z")),
+                  "week used: " + ((.secondary.used_percent // 0) | tostring) + "%",
+                  "week reset: " + ((.secondary.resets_at // 0) | strflocaltime("%Y-%m-%d %H:%M:%S %Z"))
+                ]
+              | .[]
+            ' "$latest" | tail -n 5 || true
+          }
+
+          prime_account() {
+            local account_number="$1"
+            local label="Account $account_number"
+            local auth_var="CODEX_AUTH_JSON_${account_number}"
+            local secret_name="CODEX_AUTH_JSON_${account_number}"
+            local auth_json="${!auth_var:-}"
+            local codex_home="$RUNNER_TEMP/codex-home-$account_number"
+            local work_dir="$RUNNER_TEMP/codex-prime-account-$account_number"
+            local before_hash after_hash codex_status
+
+            echo
+            echo "===== $label ====="
+            echo "UTC now:    $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "Taipei now: $(TZ=Asia/Taipei date '+%Y-%m-%d %H:%M:%S %Z')"
+
+            if [[ -z "$auth_json" ]]; then
+              echo "::error::$secret_name is empty or missing."
+              return 2
+            fi
+
+            rm -rf "$codex_home" "$work_dir"
+            mkdir -p "$codex_home" "$work_dir"
+            chmod 700 "$codex_home"
+
+            printf '%s' "$auth_json" > "$codex_home/auth.json"
+            chmod 600 "$codex_home/auth.json"
+
+            cat > "$codex_home/config.toml" <<EOF
+          model = "$MODEL"
+          approval_policy = "never"
+          sandbox_mode = "read-only"
+          EOF
+            chmod 600 "$codex_home/config.toml"
+
+            before_hash="$(sha256sum "$codex_home/auth.json" | awk '{print $1}')"
+
+            export CODEX_HOME="$codex_home"
+            cd "$work_dir"
+
+            # Do not stop here on an inference/auth error: Codex may have refreshed
+            # auth.json before the request failed, and that updated token chain must
+            # still be persisted.
+            set +e
+            codex exec \
+              --model "$MODEL" \
+              --skip-git-repo-check \
+              --sandbox read-only \
+              "Reply exactly: OK"
+            codex_status=$?
+            set -e
+
+            after_hash="$(sha256sum "$codex_home/auth.json" | awk '{print $1}')"
+
+            if [[ "$before_hash" != "$after_hash" ]]; then
+              echo "$label auth.json changed; persisting refreshed credentials to $secret_name."
+              if ! persist_auth "$secret_name" "$codex_home/auth.json"; then
+                return 90
+              fi
+              echo "$label refreshed credentials persisted successfully."
+            else
+              echo "$label auth.json unchanged; no secret update required."
+            fi
+
+            show_rate_limits "$codex_home" "$label"
+
+            if [[ $codex_status -ne 0 ]]; then
+              echo "::error::$label Codex execution failed with exit code $codex_status. If authentication is stale, update $secret_name manually."
+              return "$codex_status"
+            fi
+
+            echo "$label prime completed successfully."
+            return 0
+          }
+
+          set +e
+          prime_account 1
+          status_1=$?
+          prime_account 2
+          status_2=$?
+          set -e
+
+          if [[ $status_1 -ne 0 ]]; then
+            overall_status=1
+          fi
+          if [[ $status_2 -ne 0 ]]; then
+            overall_status=1
+          fi
+
+          echo
+          echo "===== Summary ====="
+          echo "Account 1 status: $status_1"
+          echo "Account 2 status: $status_2"
+
+          exit "$overall_status"
