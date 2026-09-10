@@ -6,8 +6,8 @@ on:
       timezone: "Asia/Taipei"
     - cron: "5 11 * * 1-5"
       timezone: "Asia/Taipei"
-    - cron: "10 16 * * 1-5"
-      timezone: "Asia/Taipei"
+    # - cron: "10 16 * * 1-5"
+    #   timezone: "Asia/Taipei"
   workflow_dispatch:
 
 concurrency:
