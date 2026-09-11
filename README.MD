@@ -9,10 +9,10 @@ Weekdays in Asia/Taipei:
 - 05:50
 - 11:05
 
-Cloudflare Cron Triggers run in UTC, so the deployed Worker uses:
+Cloudflare Cron Triggers run in UTC. Cloudflare Workers use weekday values `1=Sunday` through `7=Saturday`, so this project uses weekday names to avoid ambiguity:
 
-- `50 21 * * 0-4` -> Monday-Friday 05:50 Asia/Taipei
-- `5 3 * * 1-5` -> Monday-Friday 11:05 Asia/Taipei
+- `50 21 * * SUN-THU` -> Monday-Friday 05:50 Asia/Taipei
+- `5 3 * * MON-FRI` -> Monday-Friday 11:05 Asia/Taipei
 
 ## Cloudflare Worker
 
