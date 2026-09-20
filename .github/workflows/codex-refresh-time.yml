@@ -147,10 +147,11 @@ jobs:
               include: []
             }' > "$payload_file"
 
-            set +e
-            http_status="$(curl -sS --connect-timeout 20 --max-time 120 -D "$headers_file" -o "$body_file" -w '%{http_code}' -X POST "$ENDPOINT"               -H "Authorization: Bearer $access_token"               -H "ChatGPT-Account-ID: $account_id"               -H "Content-Type: application/json"               -H "Accept: text/event-stream"               -H "OpenAI-Beta: responses=v1"               -H "originator: codex_cli_rs"               -H "version: $CODEX_VERSION"               -H "session_id: $session_id"               -H "User-Agent: codex_cli_rs/$CODEX_VERSION"               --data-binary "@$payload_file")"
-            curl_status=$?
-            set -e
+            if http_status="$(curl -sS --connect-timeout 20 --max-time 120 -D "$headers_file" -o "$body_file" -w '%{http_code}' -X POST "$ENDPOINT"               -H "Authorization: Bearer $access_token"               -H "ChatGPT-Account-ID: $account_id"               -H "Content-Type: application/json"               -H "Accept: text/event-stream"               -H "OpenAI-Beta: responses=v1"               -H "originator: codex_cli_rs"               -H "version: $CODEX_VERSION"               -H "session_id: $session_id"               -H "User-Agent: codex_cli_rs/$CODEX_VERSION"               --data-binary "@$payload_file")"; then
+              curl_status=0
+            else
+              curl_status=$?
+            fi
 
             if [[ $curl_status -ne 0 ]]; then
               echo "::error::Lightweight HTTP request failed at transport level (curl exit $curl_status)."
@@ -185,10 +186,11 @@ jobs:
 
             echo "$label authentication requires refresh; falling back to Codex CLI."
 
-            set +e
-            codex exec --model "$MODEL" --skip-git-repo-check --sandbox read-only "Reply exactly: OK"
-            codex_status=$?
-            set -e
+            if codex exec --model "$MODEL" --skip-git-repo-check --sandbox read-only "Reply exactly: OK"; then
+              codex_status=0
+            else
+              codex_status=$?
+            fi
 
             after_hash="$(sha256sum "$codex_home/auth.json" | awk '{print $1}')"
 
@@ -253,10 +255,11 @@ jobs:
               return $?
             fi
 
-            set +e
-            lightweight_prime "$access_token" "$account_id" "$headers_file" "$body_file" "$payload_file"
-            http_result=$?
-            set -e
+            if lightweight_prime "$access_token" "$account_id" "$headers_file" "$body_file" "$payload_file"; then
+              http_result=0
+            else
+              http_result=$?
+            fi
 
             case "$http_result" in
               0)
@@ -276,12 +279,16 @@ jobs:
             esac
           }
 
-          set +e
-          prime_account 1
-          status_1=$?
-          prime_account 2
-          status_2=$?
-          set -e
+          if prime_account 1; then
+            status_1=0
+          else
+            status_1=$?
+          fi
+          if prime_account 2; then
+            status_2=0
+          else
+            status_2=$?
+          fi
 
           [[ $status_1 -ne 0 ]] && overall_status=1
           [[ $status_2 -ne 0 ]] && overall_status=1
